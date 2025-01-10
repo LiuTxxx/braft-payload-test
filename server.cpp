@@ -21,6 +21,9 @@
 #include <braft/protobuf_file.h>         // braft::ProtoBufFile
 #include "payload.pb.h"                 // PayloadService
 
+// 声明外部变量，这样我们可以访问 braft 内部的 raft_leader_batch
+DECLARE_int32(raft_leader_batch);
+
 DEFINE_bool(check_term, true, "Check if the leader changed to another term");
 DEFINE_bool(disable_cli, false, "Don't allow raft_cli access this node");
 DEFINE_bool(log_applied_task, false, "Print notice log when a task is applied");
@@ -173,6 +176,15 @@ friend class ReplicatePayloadClosure;
     }
 
     void on_apply(braft::Iterator& iter) {
+        static int64_t last_print_time = 0;
+        int64_t now = butil::gettimeofday_us();
+        
+        // 每5秒打印一次当前的 batch size
+        if (now - last_print_time > 5000000) {  // 5秒 = 5000000微秒
+            LOG(INFO) << "Current raft_leader_batch size: " << FLAGS_raft_leader_batch;
+            last_print_time = now;
+        }
+
         for (; iter.valid(); iter.next()) {
             braft::AsyncClosureGuard closure_guard(iter.done());
             
@@ -329,6 +341,9 @@ private:
 int main(int argc, char* argv[]) {
     GFLAGS_NS::ParseCommandLineFlags(&argc, &argv, true);
     butil::AtExitManager exit_manager;
+
+    // 在服务启动时打印当前的 batch size
+    LOG(INFO) << "Starting server with raft_leader_batch=" << FLAGS_raft_leader_batch;
 
     // Generally you only need one Server.
     brpc::Server server;
