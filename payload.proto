@@ -1,0 +1,21 @@
+syntax="proto2";
+package example;
+option cc_generic_services = true;
+
+message Snapshot {
+    required bytes payload = 1;
+};
+
+message PayloadRequest {
+    required bytes payload = 1;  // 256字节的payload
+};
+
+message PayloadResponse {
+    required bool success = 1;
+    optional bytes payload = 2;
+    optional string redirect = 3;
+};
+
+service PayloadService {
+    rpc replicate_payload(PayloadRequest) returns (PayloadResponse);
+}; 
