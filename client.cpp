@@ -13,105 +13,85 @@
 // limitations under the License.
 
 #include <gflags/gflags.h>
-#include <bthread/bthread.h>
+#include <butil/logging.h>
+#include <butil/time.h>
 #include <brpc/channel.h>
 #include <brpc/controller.h>
 #include <braft/raft.h>
-#include <braft/util.h>
-#include <braft/route_table.h>
 #include "payload.pb.h"
 
-DEFINE_bool(log_each_request, false, "Print log for each request");
+DEFINE_string(addr, "127.0.0.1:8100", "Server address");
+DEFINE_int32(timeout_ms, 1000, "RPC timeout in milliseconds");
+DEFINE_int32(request_size, 256, "Size of the payload to send");
 DEFINE_bool(use_bthread, false, "Use bthread to send requests");
 DEFINE_int32(thread_num, 1, "Number of threads sending requests");
-DEFINE_int32(timeout_ms, 1000, "Timeout for each request");
-DEFINE_string(conf, "", "Configuration of the raft group");
-DEFINE_string(group, "PayloadTest", "Id of the replication group");
-DEFINE_int32(payload_size, 256, "Size of the payload to send");
+DEFINE_int32(send_iters, 0, "Number of requests to send for each thread, 0 means unlimited");
+DEFINE_int32(send_interval_ms, 1000, "Milliseconds between consecutive requests");
 
-bvar::LatencyRecorder g_latency_recorder("payload_client");
+bvar::LatencyRecorder g_latency_recorder("client");
+bvar::Adder<int> g_error_counter("client_error_count");
 
 static void* sender(void* arg) {
-    while (!brpc::IsAskedToQuit()) {
-        braft::PeerId leader;
-        // Select leader of the target group from RouteTable
-        if (braft::rtb::select_leader(FLAGS_group, &leader) != 0) {
-            // Leader is unknown in RouteTable. Ask RouteTable to refresh leader
-            butil::Status st = braft::rtb::refresh_leader(
-                        FLAGS_group, FLAGS_timeout_ms);
-            if (!st.ok()) {
-                LOG(WARNING) << "Fail to refresh_leader : " << st;
-                bthread_usleep(FLAGS_timeout_ms * 1000L);
-            }
-            continue;
-        }
+    int thread_index = (int)(intptr_t)arg;
+    int base_counter = thread_index << 24;
+    int counter = 0;
+    brpc::Channel channel;
+    brpc::ChannelOptions options;
+    options.protocol = "baidu_std";
+    options.connection_type = "single";
+    options.timeout_ms = FLAGS_timeout_ms;
+    options.max_retry = 3;
 
-        // Now we known who is the leader, construct Stub and sending rpc
-        brpc::Channel channel;
-        if (channel.Init(leader.addr, NULL) != 0) {
-            LOG(ERROR) << "Fail to init channel to " << leader;
-            bthread_usleep(FLAGS_timeout_ms * 1000L);
-            continue;
-        }
-        example::PayloadService_Stub stub(&channel);
-
-        brpc::Controller cntl;
-        cntl.set_timeout_ms(FLAGS_timeout_ms);
-        example::PayloadResponse response;
-
-        // Prepare payload
-        example::PayloadRequest request;
-        std::string payload(FLAGS_payload_size, 'x');
-        request.set_payload(payload);
-
-        // Send request
-        stub.replicate_payload(&cntl, &request, &response, NULL);
-
-        if (cntl.Failed()) {
-            LOG(WARNING) << "Fail to send request to " << leader
-                         << " : " << cntl.ErrorText();
-            // Clear leadership since this RPC failed.
-            braft::rtb::update_leader(FLAGS_group, braft::PeerId());
-            bthread_usleep(FLAGS_timeout_ms * 1000L);
-            continue;
-        }
-        if (!response.success()) {
-            LOG(WARNING) << "Fail to send request to " << leader
-                         << ", redirecting to "
-                         << (response.has_redirect() 
-                                ? response.redirect() : "nowhere");
-            // Update route table since we have redirect information
-            braft::rtb::update_leader(FLAGS_group, response.redirect());
-            continue;
-        }
-        g_latency_recorder << cntl.latency_us();
-        if (FLAGS_log_each_request) {
-            LOG(INFO) << "Received response from " << leader
-                      << " payload_size=" << response.payload().size()
-                      << " latency=" << cntl.latency_us();
-            bthread_usleep(1000L * 1000L);
-        }
+    if (channel.Init(FLAGS_addr.c_str(), &options) != 0) {
+        LOG(ERROR) << "Fail to initialize channel";
+        return NULL;
     }
+
+    example::PayloadService_Stub stub(&channel);
+
+    while (!brpc::IsAskedToQuit() && 
+           (FLAGS_send_iters == 0 || counter < FLAGS_send_iters)) {
+        example::PayloadRequest request;
+        example::PayloadResponse response;
+        brpc::Controller cntl;
+
+        request.set_payload(std::string(FLAGS_request_size, 'x'));
+        
+        stub.replicate_payload(&cntl, &request, &response, NULL);
+        if (!cntl.Failed()) {
+            g_latency_recorder << cntl.latency_us();
+            if (response.success()) {
+                ++counter;
+                continue;
+            }
+            if (response.has_redirect()) {
+                LOG(WARNING) << "Redirected to " << response.redirect();
+                if (channel.Init(response.redirect().c_str(), &options) != 0) {
+                    LOG(ERROR) << "Fail to initialize channel to " << response.redirect();
+                }
+                continue;
+            }
+        } else {
+            g_error_counter << 1;
+        }
+        LOG_EVERY_SECOND(WARNING) << "Fail to send request to " << FLAGS_addr
+                                 << " : " << (cntl.Failed() ? cntl.ErrorText() : "redirect");
+        bthread_usleep(FLAGS_timeout_ms * 1000L);
+    }
+
     return NULL;
 }
 
 int main(int argc, char* argv[]) {
-    GFLAGS_NS::ParseCommandLineFlags(&argc, &argv, true);
+    google::ParseCommandLineFlags(&argc, &argv, true);
     butil::AtExitManager exit_manager;
-
-    // Register configuration of target group to RouteTable
-    if (braft::rtb::update_configuration(FLAGS_group, FLAGS_conf) != 0) {
-        LOG(ERROR) << "Fail to register configuration " << FLAGS_conf
-                   << " of group " << FLAGS_group;
-        return -1;
-    }
 
     std::vector<bthread_t> tids;
     std::vector<pthread_t> pids;
     if (!FLAGS_use_bthread) {
         pids.resize(FLAGS_thread_num);
         for (int i = 0; i < FLAGS_thread_num; ++i) {
-            if (pthread_create(&pids[i], NULL, sender, NULL) != 0) {
+            if (pthread_create(&pids[i], NULL, sender, (void*)(intptr_t)i) != 0) {
                 LOG(ERROR) << "Fail to create pthread";
                 return -1;
             }
@@ -119,7 +99,7 @@ int main(int argc, char* argv[]) {
     } else {
         tids.resize(FLAGS_thread_num);
         for (int i = 0; i < FLAGS_thread_num; ++i) {
-            if (bthread_start_background(&tids[i], NULL, sender, NULL) != 0) {
+            if (bthread_start_background(&tids[i], NULL, sender, (void*)(intptr_t)i) != 0) {
                 LOG(ERROR) << "Fail to create bthread";
                 return -1;
             }
@@ -128,14 +108,13 @@ int main(int argc, char* argv[]) {
 
     while (!brpc::IsAskedToQuit()) {
         sleep(1);
-        LOG_IF(INFO, !FLAGS_log_each_request)
-                << "Sending Request to " << FLAGS_group
-                << " (" << FLAGS_conf << ')'
-                << " at qps=" << g_latency_recorder.qps(1)
-                << " latency=" << g_latency_recorder.latency(1);
+        LOG(INFO) << "Sending Request to " << FLAGS_addr 
+                 << " at qps=" << g_latency_recorder.qps(1)
+                 << " latency=" << g_latency_recorder.latency(1)
+                 << " error=" << g_error_counter.get_value();
     }
 
-    LOG(INFO) << "Payload client is going to quit";
+    LOG(INFO) << "Client is going to quit";
     for (int i = 0; i < FLAGS_thread_num; ++i) {
         if (!FLAGS_use_bthread) {
             pthread_join(pids[i], NULL);
@@ -143,6 +122,5 @@ int main(int argc, char* argv[]) {
             bthread_join(tids[i], NULL);
         }
     }
-
     return 0;
 } 
