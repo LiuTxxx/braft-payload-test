@@ -18,4 +18,4 @@
 #      REVISION:  ---
 #===============================================================================
 
-killall -9 counter_server
+killall -9 payload_server
