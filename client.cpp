@@ -65,9 +65,9 @@ static void* sender(void* arg) {
         example::PayloadResponse response;
 
         if (butil::fast_rand_less_than(100) < (size_t)FLAGS_add_percentage) {
-            example::FetchAddRequest request;
-            request.set_value(FLAGS_added_by);
-            stub.fetch_add(&cntl, &request, &response, NULL);
+            example::PayloadRequest request;
+            request.set_payload(std::string(FLAGS_payload_size, 'x'));
+            stub.replicate_payload(&cntl, &request, &response, NULL);
         } else {
             example::GetRequest request;
             stub.get(&cntl, &request, &response, NULL);
