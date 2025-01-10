@@ -28,6 +28,10 @@ DEFINE_bool(use_bthread, false, "Use bthread to send requests");
 DEFINE_int32(thread_num, 1, "Number of threads sending requests");
 DEFINE_int32(send_iters, 0, "Number of requests to send for each thread, 0 means unlimited");
 DEFINE_int32(send_interval_ms, 1000, "Milliseconds between consecutive requests");
+DEFINE_bool(log_each_request, false, "Print log for each request");
+DEFINE_string(conf, "", "Configuration of the raft group");
+DEFINE_string(group, "PayloadTest", "Id of the replication group");
+DEFINE_int32(add_percentage, 100, "Percentage of requests to actually send");
 
 bvar::LatencyRecorder g_latency_recorder("client");
 bvar::Adder<int> g_error_counter("client_error_count");
@@ -43,15 +47,54 @@ static void* sender(void* arg) {
     options.timeout_ms = FLAGS_timeout_ms;
     options.max_retry = 3;
 
-    if (channel.Init(FLAGS_addr.c_str(), &options) != 0) {
-        LOG(ERROR) << "Fail to initialize channel";
-        return NULL;
+    // 如果提供了conf，使用raft group配置
+    if (!FLAGS_conf.empty()) {
+        if (braft::rtb::update_configuration(FLAGS_group, FLAGS_conf) != 0) {
+            LOG(ERROR) << "Fail to update configuration " << FLAGS_conf;
+            return NULL;
+        }
+        // 初始化channel会在后面的循环中进行
+    } else {
+        // 否则直接连接指定地址
+        if (channel.Init(FLAGS_addr.c_str(), &options) != 0) {
+            LOG(ERROR) << "Fail to initialize channel";
+            return NULL;
+        }
     }
 
     example::PayloadService_Stub stub(&channel);
 
     while (!brpc::IsAskedToQuit() && 
            (FLAGS_send_iters == 0 || counter < FLAGS_send_iters)) {
+        
+        // 根据add_percentage决定是否发送请求
+        if (butil::fast_rand_less_than(100) >= (size_t)FLAGS_add_percentage) {
+            bthread_usleep(FLAGS_send_interval_ms * 1000L);
+            continue;
+        }
+
+        // 如果使用raft group，需要获取leader
+        if (!FLAGS_conf.empty()) {
+            braft::PeerId leader;
+            // Select leader of the target group from RouteTable
+            if (braft::rtb::select_leader(FLAGS_group, &leader) != 0) {
+                // Leader is unknown in RouteTable. Ask RouteTable to refresh leader
+                butil::Status st = braft::rtb::refresh_leader(
+                            FLAGS_group, FLAGS_timeout_ms);
+                if (!st.ok()) {
+                    LOG(WARNING) << "Fail to refresh_leader : " << st;
+                    bthread_usleep(FLAGS_timeout_ms * 1000L);
+                }
+                continue;
+            }
+            
+            if (channel.Init(leader.addr, &options) != 0) {
+                LOG(ERROR) << "Fail to initialize channel to " << leader;
+                bthread_usleep(FLAGS_timeout_ms * 1000L);
+                continue;
+            }
+        }
+
         example::PayloadRequest request;
         example::PayloadResponse response;
         brpc::Controller cntl;
@@ -63,6 +106,11 @@ static void* sender(void* arg) {
             g_latency_recorder << cntl.latency_us();
             if (response.success()) {
                 ++counter;
+                if (FLAGS_log_each_request) {
+                    LOG(INFO) << "Received response success, payload_size=" 
+                             << response.payload().size()
+                             << " latency=" << cntl.latency_us();
+                }
                 continue;
             }
             if (response.has_redirect()) {
@@ -109,10 +157,12 @@ int main(int argc, char* argv[]) {
 
     while (!brpc::IsAskedToQuit()) {
         sleep(1);
-        LOG(INFO) << "Sending Request to " << FLAGS_addr 
-                 << " at qps=" << g_latency_recorder.qps(1)
-                 << " latency=" << g_latency_recorder.latency(1)
-                 << " error=" << g_error_counter.get_value();
+        LOG_IF(INFO, !FLAGS_log_each_request)
+                << "Sending Request to " << (FLAGS_conf.empty() ? FLAGS_addr : FLAGS_group)
+                << (FLAGS_conf.empty() ? "" : "(" + FLAGS_conf + ")")
+                << " at qps=" << g_latency_recorder.qps(1)
+                << " latency=" << g_latency_recorder.latency(1)
+                << " error=" << g_error_counter.get_value();
     }
 
     LOG(INFO) << "Client is going to quit";
