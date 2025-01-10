@@ -13,11 +13,12 @@
 // limitations under the License.
 
 #include <gflags/gflags.h>
-#include <butil/logging.h>
-#include <butil/time.h>
+#include <bthread/bthread.h>
 #include <brpc/channel.h>
 #include <brpc/controller.h>
 #include <braft/raft.h>
+#include <braft/util.h>
+#include <braft/route_table.h>
 #include "payload.pb.h"
 
 DEFINE_string(addr, "127.0.0.1:8100", "Server address");
