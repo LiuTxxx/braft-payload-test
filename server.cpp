@@ -19,10 +19,14 @@
 #include <braft/storage.h>               // braft::SnapshotWriter
 #include <braft/util.h>                  // braft::AsyncClosureGuard
 #include <braft/protobuf_file.h>         // braft::ProtoBufFile
+#include <braft/log_manager.h>           // 引入log_manager以访问FLAGS_raft_leader_batch
 #include "payload.pb.h"                 // PayloadService
 
-// 声明外部变量，这样我们可以访问 braft 内部的 raft_leader_batch
-DECLARE_int32(raft_leader_batch);
+// 使用正确的命名空间声明外部变量
+namespace braft {
+    DECLARE_int32(raft_leader_batch);
+}
+using braft::FLAGS_raft_leader_batch;  // 使其在当前命名空间可用
 
 DEFINE_bool(check_term, true, "Check if the leader changed to another term");
 DEFINE_bool(disable_cli, false, "Don't allow raft_cli access this node");
@@ -176,15 +180,6 @@ friend class ReplicatePayloadClosure;
     }
 
     void on_apply(braft::Iterator& iter) {
-        static int64_t last_print_time = 0;
-        int64_t now = butil::gettimeofday_us();
-        
-        // 每5秒打印一次当前的 batch size
-        if (now - last_print_time > 5000000) {  // 5秒 = 5000000微秒
-            LOG(INFO) << "Current raft_leader_batch size: " << FLAGS_raft_leader_batch;
-            last_print_time = now;
-        }
-
         for (; iter.valid(); iter.next()) {
             braft::AsyncClosureGuard closure_guard(iter.done());
             
