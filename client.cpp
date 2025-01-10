@@ -92,7 +92,7 @@ static void* sender(void* arg) {
         g_latency_recorder << cntl.latency_us();
         if (FLAGS_log_each_request) {
             LOG(INFO) << "Received response from " << leader
-                      << " value=" << response.value()
+                      << " payload=" << response.payload()
                       << " latency=" << cntl.latency_us();
             bthread_usleep(1000L * 1000L);
         }
