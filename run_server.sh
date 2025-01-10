@@ -48,5 +48,5 @@ exec ./payload_test_server \
     -port=${port} \
     -group=${group} \
     -data_path=${data} \
-    -batch_size=${batch} \
-    -conf="${conf}" 
+    -conf="${conf}" \
+    -raft_leader_batch=${batch} 

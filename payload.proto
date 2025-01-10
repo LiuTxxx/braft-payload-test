@@ -10,6 +10,9 @@ message PayloadRequest {
     required bytes payload = 1;  // 256字节的payload
 };
 
+message GetRequest {
+};
+
 message PayloadResponse {
     required bool success = 1;
     optional bytes payload = 2;
@@ -18,4 +21,5 @@ message PayloadResponse {
 
 service PayloadService {
     rpc replicate_payload(PayloadRequest) returns (PayloadResponse);
+    rpc get(GetRequest) returns (PayloadResponse);
 }; 
